@@ -33,6 +33,18 @@ go run ./cmd/placidus
 
 The application still starts when Mirakurun or FFmpeg is unavailable so the home page and `/healthz` can report actionable diagnostics. Live viewing requires FFmpeg; guide and recording operations require Mirakurun.
 
+An Alpine Linux multi-stage image is also provided:
+
+```sh
+docker build -t placidus .
+docker run --rm -p 40773:40773 \
+  -e PLACIDUS_MIRAKURUN_URL=http://mirakurun:40772 \
+  -v placidus-data:/var/lib/placidus \
+  placidus
+```
+
+Pass the relevant GPU or `/dev/dri` device options to the container when hardware encoding is required.
+
 ## Configuration
 
 All configuration is read from environment variables.

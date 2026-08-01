@@ -1,4 +1,4 @@
-FROM golang:1.26-bookworm AS build
+FROM golang:1.26-alpine3.24 AS build
 
 WORKDIR /src
 COPY go.mod ./
@@ -6,11 +6,9 @@ COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/placidus ./cmd/placidus
 
-FROM debian:bookworm-slim
+FROM alpine:3.24.1
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg tzdata \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ca-certificates ffmpeg tzdata
 COPY --from=build /out/placidus /usr/local/bin/placidus
 
 ENV PLACIDUS_LISTEN=:40773 \
