@@ -1,5 +1,7 @@
 package transcode
 
+import "path/filepath"
+
 // LiveArguments builds deterministic FFmpeg arguments for low-latency browser HLS.
 func LiveArguments(inputURL, playlistPath string, encoder Encoder) []string {
 	args := []string{"-hide_banner", "-loglevel", "warning", "-nostdin", "-y"}
@@ -24,7 +26,7 @@ func LiveArguments(inputURL, playlistPath string, encoder Encoder) []string {
 		"-hls_time", "2",
 		"-hls_list_size", "6",
 		"-hls_flags", "delete_segments+append_list+independent_segments",
-		"-hls_segment_filename", playlistPath[:len(playlistPath)-len("index.m3u8")]+"segment-%06d.ts",
+		"-hls_segment_filename", filepath.Join(filepath.Dir(playlistPath), "segment-%06d.ts"),
 		playlistPath,
 	)
 	return args
