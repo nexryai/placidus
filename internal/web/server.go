@@ -40,20 +40,21 @@ type reservationScheduler interface {
 
 // Server owns the HTTP presentation layer.
 type Server struct {
-	backend      mirakurun.API
-	store        *recording.Store
-	scheduler    reservationScheduler
-	live         liveService
-	coordinator  *tuner.Coordinator
-	recordingDir string
-	tunerLimit   int
-	logger       *slog.Logger
-	templates    *template.Template
-	mux          *http.ServeMux
+	backend         mirakurun.API
+	store           *recording.Store
+	scheduler       reservationScheduler
+	live            liveService
+	coordinator     *tuner.Coordinator
+	recordingDir    string
+	recordingMargin time.Duration
+	tunerLimit      int
+	logger          *slog.Logger
+	templates       *template.Template
+	mux             *http.ServeMux
 }
 
 // NewServer parses embedded templates and registers application routes.
-func NewServer(backend mirakurun.API, store *recording.Store, scheduler reservationScheduler, live liveService, coordinator *tuner.Coordinator, recordingDir string, tunerLimit int, logger *slog.Logger) (*Server, error) {
+func NewServer(backend mirakurun.API, store *recording.Store, scheduler reservationScheduler, live liveService, coordinator *tuner.Coordinator, recordingDir string, recordingMargin time.Duration, tunerLimit int, logger *slog.Logger) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -69,7 +70,7 @@ func NewServer(backend mirakurun.API, store *recording.Store, scheduler reservat
 	}
 	server := &Server{
 		backend: backend, store: store, scheduler: scheduler, live: live, coordinator: coordinator,
-		recordingDir: recordingDir, tunerLimit: tunerLimit, logger: logger, templates: views, mux: http.NewServeMux(),
+		recordingDir: recordingDir, recordingMargin: recordingMargin, tunerLimit: tunerLimit, logger: logger, templates: views, mux: http.NewServeMux(),
 	}
 	server.routes()
 	return server, nil
@@ -84,6 +85,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /", s.home)
 	s.mux.HandleFunc("GET /live/{serviceID}", s.livePage)
 	s.mux.HandleFunc("GET /hls/{serviceID}/{file}", s.hlsFile)
+	s.mux.HandleFunc("GET /api/live/{serviceID}/status", s.liveStatus)
 	s.mux.HandleFunc("GET /reservations", s.reservationsPage)
 	s.mux.HandleFunc("POST /reservations", s.createReservation)
 	s.mux.HandleFunc("POST /reservations/{id}/cancel", s.cancelReservation)
@@ -213,6 +215,17 @@ func (s *Server) hlsFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, path)
 }
 
+func (s *Server) liveStatus(w http.ResponseWriter, r *http.Request) {
+	serviceID, err := parseUintPath(r.PathValue("serviceID"))
+	if err != nil {
+		http.Error(w, "Invalid service ID", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(s.live.Status(serviceID))
+}
+
 func (s *Server) reservationsPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "reservations", reservationsData{
 		Page: pageMeta{
@@ -269,7 +282,15 @@ func (s *Server) createReservation(w http.ResponseWriter, r *http.Request) {
 		ProgramID: selected.ID, ServiceID: serviceID, Title: fallbackTitle(selected.Name),
 		StartAt: selected.StartTime(), EndAt: selected.EndTime(),
 	}
-	if recording.WouldConflict(s.store.List(), item, s.tunerLimit) {
+	conflictCandidate := item
+	conflictCandidate.StartAt = conflictCandidate.StartAt.Add(-s.recordingMargin)
+	conflictCandidate.EndAt = conflictCandidate.EndAt.Add(s.recordingMargin)
+	existing := s.store.List()
+	for index := range existing {
+		existing[index].StartAt = existing[index].StartAt.Add(-s.recordingMargin)
+		existing[index].EndAt = existing[index].EndAt.Add(s.recordingMargin)
+	}
+	if recording.WouldConflict(existing, conflictCandidate, s.tunerLimit) {
 		s.redirectReservations(w, r, "", "This reservation conflicts with another service and the configured tuner limit.")
 		return
 	}

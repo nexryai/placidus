@@ -27,6 +27,10 @@ go.work.sum
 # env file
 .env
 
+# placidus runtime data and default build output
+/data/
+/placidus
+
 # Editor/IDE
 # .idea/
 # .vscode/

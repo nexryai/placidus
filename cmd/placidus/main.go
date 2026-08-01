@@ -68,14 +68,18 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	webServer, err := web.NewServer(backend, store, scheduler, liveManager, coordinator, cfg.RecordingDir, cfg.TunerLimit, logger)
+	webServer, err := web.NewServer(backend, store, scheduler, liveManager, coordinator, cfg.RecordingDir, cfg.ScheduleMargin, cfg.TunerLimit, logger)
 	if err != nil {
 		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go scheduler.Run(ctx)
+	schedulerDone := make(chan struct{})
+	go func() {
+		scheduler.Run(ctx)
+		close(schedulerDone)
+	}()
 
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddress,
@@ -97,12 +101,18 @@ func run(logger *slog.Logger) error {
 		if err := httpServer.Shutdown(shutdownContext); err != nil {
 			return err
 		}
+		select {
+		case <-schedulerDone:
+		case <-shutdownContext.Done():
+			return shutdownContext.Err()
+		}
 		return nil
 	case err := <-errorsFromServer:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		stop()
+		<-schedulerDone
 		return err
 	}
 }

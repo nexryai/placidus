@@ -1,7 +1,6 @@
 package transcode
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -34,6 +33,7 @@ type liveSession struct {
 	warning   string
 	err       string
 	lastTouch time.Time
+	startedAt time.Time
 	ready     bool
 }
 
@@ -175,18 +175,19 @@ func (m *LiveManager) launchLocked(ctx context.Context, session *liveSession, en
 	input.RawQuery = query.Encode()
 	playlist := filepath.Join(session.directory, "index.m3u8")
 	command := exec.CommandContext(ctx, m.binary, LiveArguments(input.String(), playlist, encoder)...)
-	var stderr bytes.Buffer
-	command.Stderr = &stderr
+	stderr := &tailBuffer{limit: 8192}
+	command.Stderr = stderr
 	if err := command.Start(); err != nil {
 		return fmt.Errorf("start FFmpeg with %s: %w", encoder.Name, err)
 	}
 	session.encoder = encoder
+	session.startedAt = time.Now()
 	m.logger.Info("live transcoder started", "service_id", session.serviceID, "encoder", encoder.Name, "hardware", encoder.Hardware)
-	go m.waitForProcess(ctx, session, command, &stderr)
+	go m.waitForProcess(ctx, session, command, stderr)
 	return nil
 }
 
-func (m *LiveManager) waitForProcess(ctx context.Context, session *liveSession, command *exec.Cmd, stderr *bytes.Buffer) {
+func (m *LiveManager) waitForProcess(ctx context.Context, session *liveSession, command *exec.Cmd, stderr *tailBuffer) {
 	err := command.Wait()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -194,7 +195,8 @@ func (m *LiveManager) waitForProcess(ctx context.Context, session *liveSession, 
 		return
 	}
 	reason := compactError(err, stderr.String())
-	if session.encoder.Hardware {
+	_, playlistErr := os.Stat(filepath.Join(session.directory, "index.m3u8"))
+	if session.encoder.Hardware && playlistErr != nil {
 		session.warning = fmt.Sprintf("Hardware encoder %s failed (%s). Falling back to software encoding; CPU usage may be high.", session.encoder.Name, reason)
 		m.logger.Warn("hardware encoding failed; falling back to software", "service_id", session.serviceID, "encoder", session.encoder.Name, "reason", reason)
 		if launchErr := m.launchLocked(ctx, session, m.capabilities.Software); launchErr == nil {
@@ -204,7 +206,7 @@ func (m *LiveManager) waitForProcess(ctx context.Context, session *liveSession, 
 		}
 	} else {
 		session.err = "FFmpeg stopped: " + reason
-		m.logger.Error("software transcoder stopped", "service_id", session.serviceID, "reason", reason)
+		m.logger.Error("transcoder stopped", "service_id", session.serviceID, "encoder", session.encoder.Name, "reason", reason)
 	}
 }
 
@@ -248,3 +250,20 @@ func compactError(err error, stderr string) string {
 	}
 	return value
 }
+
+// tailBuffer bounds long-running FFmpeg diagnostics while retaining the most
+// useful final lines for an actionable user-facing error.
+type tailBuffer struct {
+	data  []byte
+	limit int
+}
+
+func (b *tailBuffer) Write(value []byte) (int, error) {
+	b.data = append(b.data, value...)
+	if len(b.data) > b.limit {
+		b.data = append(b.data[:0], b.data[len(b.data)-b.limit:]...)
+	}
+	return len(value), nil
+}
+
+func (b *tailBuffer) String() string { return string(b.data) }

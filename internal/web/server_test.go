@@ -70,7 +70,7 @@ func newTestHandler(t *testing.T) (http.Handler, *recording.Store, mirakurun.Pro
 		t.Fatal(err)
 	}
 	coordinator := tuner.NewCoordinator(1)
-	server, err := NewServer(backend, store, fakeScheduler{store}, fakeLive{}, coordinator, filepath.Join(directory, "recordings"), 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server, err := NewServer(backend, store, fakeScheduler{store}, fakeLive{}, coordinator, filepath.Join(directory, "recordings"), 0, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,5 +130,18 @@ func TestLivePageStartsPinnedHLSPlayer(t *testing.T) {
 		if !strings.Contains(response.Body.String(), expected) {
 			t.Errorf("live page does not contain %q", expected)
 		}
+	}
+}
+
+func TestLiveStatusEndpointSupportsVisibleFallbackUpdates(t *testing.T) {
+	handler, _, _ := newTestHandler(t)
+	request := httptest.NewRequest(http.MethodGet, "/api/live/3273601024/status", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"ServiceID":3273601024`) {
+		t.Fatalf("live status response = %d %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("live status response can be cached")
 	}
 }
