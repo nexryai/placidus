@@ -1,0 +1,28 @@
+{{define "live"}}<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{.Page.Title}} · placidus</title>{{template "styles"}}<script src="https://cdn.jsdelivr.net/npm/hls.js@1.6.16/dist/hls.min.js" crossorigin="anonymous"></script></head>
+<body>{{template "chrome" .Page}}<main class="page">
+  {{if .Page.Error}}<div class="notice error" role="alert">{{.Page.Error}}</div>{{end}}{{if .BackendError}}<div class="notice error" role="alert">{{.BackendError}}</div>{{end}}
+  {{if .Live.Warning}}<div class="notice" role="status" id="encoder-warning">{{.Live.Warning}}</div>{{end}}
+  <div class="player-layout"><section><div class="player-shell"><video id="player" controls autoplay playsinline aria-label="Live television player"></video></div>
+    <h1 class="player-title">{{if .Service.Current}}{{.Service.Current.Name}}{{else}}{{.Service.Name}}{{end}}</h1><p class="muted">{{.Service.Name}}{{if .Service.Current}} · {{clock .Service.Current.StartAt}}–{{clock .Service.Current.EndAt}}{{end}} · Encoder: {{.Live.Encoder}}</p>
+    {{if .Service.Current}}<p>{{.Service.Current.Description}}</p><form method="post" action="/reservations"><input type="hidden" name="program_id" value="{{.Service.Current.ID}}"><button class="button secondary" type="submit">Record this program</button></form>{{end}}
+  </section><aside><p class="eyebrow">Channels</p><div class="channel-list">{{range .Services}}<a class="channel-item {{if eq .ID $.Service.ID}}active{{end}}" href="/live/{{.ID}}"><span class="channel-logo">{{if .Number}}{{.Number}}{{else}}TV{{end}}</span><div><p><strong>{{.Name}}</strong></p><small>{{if .Current}}{{.Current.Name}}{{else}}No current EPG data{{end}}</small></div></a>{{end}}</div></aside></div>
+</main>
+<script>
+(() => {
+  const video = document.getElementById('player');
+  const source = '/hls/{{.Service.ID}}/index.m3u8';
+  if (video.canPlayType('application/vnd.apple.mpegurl')) { video.src = source; return; }
+  if (window.Hls && Hls.isSupported()) {
+    const hls = new Hls({liveSyncDurationCount: 3, maxLiveSyncPlaybackRate: 1.2});
+    hls.loadSource(source); hls.attachMedia(video);
+    hls.on(Hls.Events.ERROR, (_event, data) => {
+      if (data.fatal) { setTimeout(() => hls.loadSource(source), 1500); }
+    });
+    return;
+  }
+  const warning = document.getElementById('encoder-warning') || document.createElement('div');
+  warning.className = 'notice error'; warning.textContent = 'This browser cannot play HLS video.';
+  video.parentElement.before(warning);
+})();
+</script></body></html>{{end}}
