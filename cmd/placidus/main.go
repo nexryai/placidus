@@ -80,6 +80,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defer logger.Info("placidus shutdown complete")
 	defer liveManager.Close()
 
 	scheduler, err := recording.NewScheduler(store, backend, coordinator, cfg.RecordingDir, cfg.ScheduleMargin, logger.With("component", "scheduler"))
@@ -122,7 +123,7 @@ func run() error {
 		}
 		select {
 		case <-schedulerDone:
-			logger.Info("placidus shutdown complete")
+			logger.Debug("HTTP server and recording scheduler stopped")
 		case <-shutdownContext.Done():
 			return shutdownContext.Err()
 		}
