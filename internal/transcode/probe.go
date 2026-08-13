@@ -4,6 +4,7 @@ package transcode
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"time"
@@ -42,31 +43,43 @@ var hardwareEncoders = []Encoder{
 }
 
 // Probe verifies FFmpeg and attempts to initialize each candidate encoder.
-func Probe(ctx context.Context, binary, preferred string) Capabilities {
+func Probe(ctx context.Context, binary, preferred string, loggers ...*slog.Logger) Capabilities {
+	logger := slog.Default()
+	if len(loggers) > 0 && loggers[0] != nil {
+		logger = loggers[0]
+	}
 	result := Capabilities{Software: softwareEncoder, Failures: make(map[string]string)}
+	logger.Debug("checking FFmpeg executable", "binary", binary)
 	versionCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(versionCtx, binary, "-version").CombinedOutput()
 	if err != nil {
 		result.Warning = fmt.Sprintf("FFmpeg is unavailable: %v", err)
+		logger.Error("FFmpeg executable check failed", "binary", binary, "error", err)
 		return result
 	}
 	result.Version = firstLine(string(output))
+	logger.Debug("FFmpeg executable detected", "version", result.Version)
 
 	candidates := orderedHardwareEncoders(preferred)
 	for _, candidate := range candidates {
+		logger.Debug("probing hardware encoder", "encoder", candidate.Name)
 		if err := probeEncoder(ctx, binary, candidate); err != nil {
 			result.Failures[candidate.Name] = err.Error()
+			logger.Debug("hardware encoder probe failed", "encoder", candidate.Name, "error", err)
 			continue
 		}
 		result.Available = true
 		result.Selected = candidate
+		logger.Info("hardware encoder probe succeeded", "encoder", candidate.Name)
 		break
 	}
 
+	logger.Debug("probing software fallback encoder", "encoder", softwareEncoder.Name)
 	softwareErr := probeEncoder(ctx, binary, softwareEncoder)
 	if softwareErr != nil {
 		result.Failures[softwareEncoder.Name] = softwareErr.Error()
+		logger.Error("software fallback encoder probe failed", "encoder", softwareEncoder.Name, "error", softwareErr)
 		if !result.Available {
 			result.Warning = "FFmpeg is installed, but no supported H.264 encoder could be initialized."
 		}
@@ -76,6 +89,7 @@ func Probe(ctx context.Context, binary, preferred string) Capabilities {
 		result.Available = true
 		result.Selected = softwareEncoder
 		result.Warning = "No hardware encoder could be initialized. FFmpeg will use software encoding, which may cause high CPU usage."
+		logger.Warn("using software fallback encoder", "encoder", softwareEncoder.Name, "hardware_failures", len(result.Failures))
 	}
 	return result
 }

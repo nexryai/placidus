@@ -1,14 +1,18 @@
 package mirakurun
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
 
 func TestClientMetadataAndStream(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/services":
@@ -29,7 +33,7 @@ func TestClientMetadataAndStream(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewClient(server.URL, server.Client())
+	client, err := NewClient(server.URL, server.Client(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,6 +57,12 @@ func TestClientMetadataAndStream(t *testing.T) {
 	data, _ := io.ReadAll(stream)
 	if string(data) != "transport-stream" {
 		t.Fatalf("stream = %q", data)
+	}
+	stream.Close()
+	for _, expected := range []string{"Mirakurun services loaded", "Mirakurun service stream opened", "Mirakurun service stream closed", `"bytes":16`} {
+		if !bytes.Contains(logs.Bytes(), []byte(expected)) {
+			t.Errorf("logs do not contain %q: %s", expected, logs.String())
+		}
 	}
 }
 

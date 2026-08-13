@@ -64,6 +64,7 @@ func NewLiveManager(binary, mirakurunURL, root string, capabilities Capabilities
 		ctx: ctx, cancel: cancel, binary: binary, mirakurunURL: mirakurunURL, root: root,
 		capabilities: capabilities, coordinator: coordinator, logger: logger, sessions: make(map[uint64]*liveSession),
 	}
+	logger.Info("live session manager initialized", "hls_root", root, "ffmpeg_available", capabilities.Available, "encoder", capabilities.Selected.Name, "hardware", capabilities.Selected.Hardware)
 	go manager.janitor()
 	return manager, nil
 }
@@ -72,9 +73,11 @@ func NewLiveManager(binary, mirakurunURL, root string, capabilities Capabilities
 func (m *LiveManager) Start(serviceID uint64) (LiveView, error) {
 	allowed, allocationWarning := m.coordinator.CanView(serviceID)
 	if !allowed {
+		m.logger.Warn("live session denied by tuner policy", "service_id", serviceID, "reason", allocationWarning)
 		return LiveView{ServiceID: serviceID, Warning: allocationWarning}, fmt.Errorf("live viewing is unavailable while recordings occupy all tuners")
 	}
 	if !m.capabilities.Available {
+		m.logger.Error("live session denied because FFmpeg is unavailable", "service_id", serviceID, "warning", m.capabilities.Warning)
 		return LiveView{ServiceID: serviceID, Warning: m.capabilities.Warning}, fmt.Errorf("FFmpeg is not ready: %s", m.capabilities.Warning)
 	}
 
@@ -86,10 +89,12 @@ func (m *LiveManager) Start(serviceID uint64) (LiveView, error) {
 		if view.Warning == "" {
 			view.Warning = allocationWarning
 		}
+		m.logger.Debug("shared live session reused", "service_id", serviceID, "encoder", session.encoder.Name, "ready", view.Ready, "age", time.Since(session.startedAt))
 		return view, nil
 	}
 	directory, err := os.MkdirTemp(m.root, strconv.FormatUint(serviceID, 10)+"-")
 	if err != nil {
+		m.logger.Error("live session directory creation failed", "service_id", serviceID, "error", err)
 		return LiveView{}, fmt.Errorf("create live session directory: %w", err)
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
@@ -100,11 +105,13 @@ func (m *LiveManager) Start(serviceID uint64) (LiveView, error) {
 	if allocationWarning != "" {
 		session.warning = allocationWarning
 	}
+	m.logger.Info("live session created", "service_id", serviceID, "directory", directory, "encoder", session.encoder.Name, "hardware", session.encoder.Hardware)
 	m.sessions[serviceID] = session
 	if err := m.launchLocked(ctx, session, session.encoder); err != nil {
 		delete(m.sessions, serviceID)
 		cancel()
 		os.RemoveAll(directory)
+		m.logger.Error("live session failed to start", "service_id", serviceID, "encoder", session.encoder.Name, "error", err)
 		return LiveView{}, err
 	}
 	return m.viewLocked(session), nil
@@ -113,6 +120,7 @@ func (m *LiveManager) Start(serviceID uint64) (LiveView, error) {
 // PlaylistPath returns the safe local path for an HLS playlist or segment.
 func (m *LiveManager) PlaylistPath(serviceID uint64, name string) (string, LiveView, error) {
 	if filepath.Base(name) != name || (filepath.Ext(name) != ".m3u8" && filepath.Ext(name) != ".ts") {
+		m.logger.Warn("invalid HLS file requested", "service_id", serviceID, "file", name)
 		return "", LiveView{}, fmt.Errorf("invalid HLS file name")
 	}
 	view, err := m.Start(serviceID)
@@ -151,9 +159,12 @@ func (m *LiveManager) Capabilities() Capabilities { return m.capabilities }
 
 // Close stops all FFmpeg processes and removes their temporary output.
 func (m *LiveManager) Close() {
+	m.logger.Info("live session manager stopping")
 	m.cancel()
 	m.mu.Lock()
+	closed := len(m.sessions)
 	for _, session := range m.sessions {
+		m.logger.Info("live session stopping", "service_id", session.serviceID, "reason", "application shutdown", "age", time.Since(session.startedAt))
 		session.cancel()
 		// Removing open HLS files is safe on supported Unix hosts and avoids
 		// leaving cleanup work racing with application shutdown.
@@ -161,6 +172,7 @@ func (m *LiveManager) Close() {
 	}
 	m.sessions = make(map[uint64]*liveSession)
 	m.mu.Unlock()
+	m.logger.Info("live session manager stopped", "sessions_closed", closed)
 }
 
 func (m *LiveManager) launchLocked(ctx context.Context, session *liveSession, encoder Encoder) error {
@@ -182,7 +194,7 @@ func (m *LiveManager) launchLocked(ctx context.Context, session *liveSession, en
 	}
 	session.encoder = encoder
 	session.startedAt = time.Now()
-	m.logger.Info("live transcoder started", "service_id", session.serviceID, "encoder", encoder.Name, "hardware", encoder.Hardware)
+	m.logger.Info("live transcoder started", "service_id", session.serviceID, "encoder", encoder.Name, "hardware", encoder.Hardware, "pid", command.Process.Pid)
 	go m.waitForProcess(ctx, session, command, stderr)
 	return nil
 }
@@ -192,13 +204,14 @@ func (m *LiveManager) waitForProcess(ctx context.Context, session *liveSession, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if ctx.Err() != nil || m.sessions[session.serviceID] != session {
+		m.logger.Debug("live transcoder exited after cancellation", "service_id", session.serviceID, "encoder", session.encoder.Name, "duration", time.Since(session.startedAt))
 		return
 	}
 	reason := compactError(err, stderr.String())
 	_, playlistErr := os.Stat(filepath.Join(session.directory, "index.m3u8"))
 	if session.encoder.Hardware && playlistErr != nil {
 		session.warning = fmt.Sprintf("Hardware encoder %s failed (%s). Falling back to software encoding; CPU usage may be high.", session.encoder.Name, reason)
-		m.logger.Warn("hardware encoding failed; falling back to software", "service_id", session.serviceID, "encoder", session.encoder.Name, "reason", reason)
+		m.logger.Warn("hardware encoding failed; falling back to software", "service_id", session.serviceID, "encoder", session.encoder.Name, "reason", reason, "duration", time.Since(session.startedAt))
 		if launchErr := m.launchLocked(ctx, session, m.capabilities.Software); launchErr == nil {
 			return
 		} else {
@@ -206,13 +219,17 @@ func (m *LiveManager) waitForProcess(ctx context.Context, session *liveSession, 
 		}
 	} else {
 		session.err = "FFmpeg stopped: " + reason
-		m.logger.Error("transcoder stopped", "service_id", session.serviceID, "encoder", session.encoder.Name, "reason", reason)
+		m.logger.Error("transcoder stopped", "service_id", session.serviceID, "encoder", session.encoder.Name, "reason", reason, "duration", time.Since(session.startedAt), "playlist_created", playlistErr == nil)
 	}
 }
 
 func (m *LiveManager) viewLocked(session *liveSession) LiveView {
+	wasReady := session.ready
 	_, err := os.Stat(filepath.Join(session.directory, "index.m3u8"))
 	session.ready = err == nil
+	if !wasReady && session.ready {
+		m.logger.Info("live HLS playlist ready", "service_id", session.serviceID, "encoder", session.encoder.Name, "startup_duration", time.Since(session.startedAt))
+	}
 	return LiveView{
 		ServiceID: session.serviceID, Encoder: session.encoder.Name, Hardware: session.encoder.Hardware,
 		Warning: session.warning, Error: session.err, Ready: session.ready,
@@ -225,11 +242,13 @@ func (m *LiveManager) janitor() {
 	for {
 		select {
 		case <-m.ctx.Done():
+			m.logger.Debug("live session janitor stopped")
 			return
 		case now := <-ticker.C:
 			m.mu.Lock()
 			for serviceID, session := range m.sessions {
 				if now.Sub(session.lastTouch) > 45*time.Second {
+					m.logger.Info("live session expired", "service_id", serviceID, "idle_duration", now.Sub(session.lastTouch), "age", now.Sub(session.startedAt))
 					session.cancel()
 					delete(m.sessions, serviceID)
 					go os.RemoveAll(session.directory)

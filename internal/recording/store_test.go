@@ -1,7 +1,10 @@
 package recording
 
 import (
+	"bytes"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -50,5 +53,32 @@ func TestStoreRejectsInvalidReservation(t *testing.T) {
 	}
 	if _, err := store.Create(Reservation{Title: "Missing service and times"}); err == nil {
 		t.Fatal("Create() accepted an invalid reservation")
+	}
+}
+
+func TestStoreLogsReservationStateTransition(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&output, nil))
+	store, err := NewStore(filepath.Join(t.TempDir(), "reservations.json"), logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := store.Create(Reservation{
+		ProgramID: 1, ServiceID: 100, Title: "Logged program",
+		StartAt: time.Now().Add(time.Hour), EndAt: time.Now().Add(2 * time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(item.ID, func(current *Reservation) error {
+		current.State = StateRecording
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"reservation created", "reservation state changed", "previous_state=scheduled", "state=recording"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Errorf("logs do not contain %q: %s", expected, output.String())
+		}
 	}
 }

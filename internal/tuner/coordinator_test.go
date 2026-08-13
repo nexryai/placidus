@@ -1,6 +1,11 @@
 package tuner
 
-import "testing"
+import (
+	"bytes"
+	"log/slog"
+	"strings"
+	"testing"
+)
 
 func TestRecordingPriorityAndSharedViewing(t *testing.T) {
 	coordinator := NewCoordinator(1)
@@ -38,5 +43,22 @@ func TestMultipleConsumersShareRecordedService(t *testing.T) {
 	releaseB()
 	if snapshot := coordinator.Snapshot(); snapshot.Occupied != 0 {
 		t.Fatalf("Occupied after final release = %d", snapshot.Occupied)
+	}
+}
+
+func TestCoordinatorLogsAllocationDecisions(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	coordinator := NewCoordinator(1, logger)
+	release, err := coordinator.AcquireRecording(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.CanView(200)
+	release()
+	for _, expected := range []string{"recording tuner allocated", "live tuner policy denied service", "recording tuner released"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Errorf("logs do not contain %q: %s", expected, output.String())
+		}
 	}
 }

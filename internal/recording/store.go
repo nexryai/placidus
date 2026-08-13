@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,16 +43,22 @@ type Reservation struct {
 
 // Store persists reservations as an atomically replaced JSON document.
 type Store struct {
-	mu    sync.RWMutex
-	path  string
-	items map[string]Reservation
+	mu     sync.RWMutex
+	path   string
+	items  map[string]Reservation
+	logger *slog.Logger
 }
 
 // NewStore opens an existing reservation file or creates an empty in-memory store.
-func NewStore(path string) (*Store, error) {
-	store := &Store{path: path, items: make(map[string]Reservation)}
+func NewStore(path string, loggers ...*slog.Logger) (*Store, error) {
+	logger := slog.Default()
+	if len(loggers) > 0 && loggers[0] != nil {
+		logger = loggers[0]
+	}
+	store := &Store{path: path, items: make(map[string]Reservation), logger: logger}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
+		logger.Info("reservation store initialized", "path", path, "reservations", 0)
 		return store, nil
 	}
 	if err != nil {
@@ -67,6 +74,7 @@ func NewStore(path string) (*Store, error) {
 	for _, item := range items {
 		store.items[item.ID] = item
 	}
+	logger.Info("reservation store loaded", "path", path, "reservations", len(items))
 	return store, nil
 }
 
@@ -92,6 +100,14 @@ func (s *Store) Create(item Reservation) (Reservation, error) {
 		delete(s.items, item.ID)
 		return Reservation{}, err
 	}
+	s.logger.Info("reservation created",
+		"reservation_id", item.ID,
+		"program_id", item.ProgramID,
+		"service_id", item.ServiceID,
+		"start_at", item.StartAt,
+		"end_at", item.EndAt,
+		"state", item.State,
+	)
 	return item, nil
 }
 
@@ -132,6 +148,17 @@ func (s *Store) Update(id string, mutate func(*Reservation) error) (Reservation,
 	if err := s.writeLocked(); err != nil {
 		s.items[id] = before
 		return Reservation{}, err
+	}
+	if before.State != item.State {
+		s.logger.Info("reservation state changed",
+			"reservation_id", item.ID,
+			"service_id", item.ServiceID,
+			"previous_state", before.State,
+			"state", item.State,
+			"error", item.Error,
+		)
+	} else {
+		s.logger.Debug("reservation updated", "reservation_id", item.ID, "state", item.State)
 	}
 	return item, nil
 }
