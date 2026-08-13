@@ -108,7 +108,7 @@ func run() error {
 	}
 	errorsFromServer := make(chan error, 1)
 	go func() {
-		logger.Info("placidus listening", "address", cfg.ListenAddress, "mirakurun", cfg.MirakurunURL)
+		logger.Info("placidus listening", "address", cfg.ListenAddress, "mirakurun_host", sanitizedHost(cfg.MirakurunURL))
 		errorsFromServer <- httpServer.ListenAndServe()
 	}()
 
