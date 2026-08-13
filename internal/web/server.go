@@ -85,7 +85,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) routes() {
-	s.mux.HandleFunc("GET /", s.home)
+	s.mux.HandleFunc("GET /{$}", s.home)
 	s.mux.HandleFunc("GET /live/{serviceID}", s.livePage)
 	s.mux.HandleFunc("GET /hls/{serviceID}/{file}", s.hlsFile)
 	s.mux.HandleFunc("GET /api/live/{serviceID}/status", s.liveStatus)

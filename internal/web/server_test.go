@@ -121,6 +121,23 @@ func TestRequestLogLevelKeepsHighFrequencyRoutesAtDebug(t *testing.T) {
 	}
 }
 
+func TestUnknownRouteReturnsNotFoundAndLogsWarning(t *testing.T) {
+	var logs strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	handler, _, _ := newTestHandlerWithLogger(t, logger)
+	request := httptest.NewRequest(http.MethodGet, "/missing", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+	for _, expected := range []string{`"level":"WARN"`, `"path":"/missing"`, `"status":404`} {
+		if !strings.Contains(logs.String(), expected) {
+			t.Errorf("logs do not contain %q: %s", expected, logs.String())
+		}
+	}
+}
+
 func TestHomeRendersMirakurunGuide(t *testing.T) {
 	handler, _, _ := newTestHandler(t)
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
