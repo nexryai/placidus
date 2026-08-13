@@ -17,8 +17,18 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.TunerLimit != 1 {
 		t.Fatalf("TunerLimit = %d", cfg.TunerLimit)
 	}
+	if cfg.LogLevel != "info" {
+		t.Fatalf("LogLevel = %q", cfg.LogLevel)
+	}
 	if cfg.RecordingDir != filepath.Join(cfg.DataDirectory, "recordings") {
 		t.Fatalf("RecordingDir = %q", cfg.RecordingDir)
+	}
+}
+
+func TestLoadRejectsInvalidLogLevel(t *testing.T) {
+	t.Setenv("PLACIDUS_LOG_LEVEL", "verbose")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() succeeded with an invalid log level")
 	}
 }
 

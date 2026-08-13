@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,35 +22,52 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	slog.SetDefault(logger)
-	if err := run(logger); err != nil {
-		logger.Error("placidus stopped", "error", err)
+	if err := run(); err != nil {
+		slog.Error("placidus stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(logger *slog.Logger) error {
+func run() error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
+	level := new(slog.LevelVar)
+	if err := level.UnmarshalText([]byte(cfg.LogLevel)); err != nil {
+		return err
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	slog.SetDefault(logger)
+	logger.Info("placidus starting",
+		"listen_address", cfg.ListenAddress,
+		"mirakurun_host", sanitizedHost(cfg.MirakurunURL),
+		"data_directory", cfg.DataDirectory,
+		"recording_directory", cfg.RecordingDir,
+		"ffmpeg_path", cfg.FFmpegPath,
+		"preferred_encoder", cfg.Encoder,
+		"tuner_limit", cfg.TunerLimit,
+		"recording_margin", cfg.ScheduleMargin,
+		"log_level", cfg.LogLevel,
+	)
 	if err := os.MkdirAll(cfg.DataDirectory, 0o755); err != nil {
 		return err
 	}
+	logger.Debug("data directory ready", "path", cfg.DataDirectory)
 
-	backend, err := mirakurun.NewClient(cfg.MirakurunURL, nil)
+	backend, err := mirakurun.NewClient(cfg.MirakurunURL, nil, logger.With("component", "mirakurun"))
 	if err != nil {
 		return err
 	}
-	store, err := recording.NewStore(filepath.Join(cfg.DataDirectory, "reservations.json"))
+	store, err := recording.NewStore(filepath.Join(cfg.DataDirectory, "reservations.json"), logger.With("component", "reservation_store"))
 	if err != nil {
 		return err
 	}
-	coordinator := tuner.NewCoordinator(cfg.TunerLimit)
+	coordinator := tuner.NewCoordinator(cfg.TunerLimit, logger.With("component", "tuner"))
 
 	probeContext, cancelProbe := context.WithTimeout(context.Background(), 45*time.Second)
-	capabilities := transcode.Probe(probeContext, cfg.FFmpegPath, cfg.Encoder)
+	logger.Info("probing FFmpeg encoders", "binary", cfg.FFmpegPath, "preferred_encoder", cfg.Encoder)
+	capabilities := transcode.Probe(probeContext, cfg.FFmpegPath, cfg.Encoder, logger.With("component", "ffmpeg_probe"))
 	cancelProbe()
 	if capabilities.Warning != "" {
 		logger.Warn("FFmpeg capability warning", "warning", capabilities.Warning, "failures", capabilities.Failures)
@@ -57,18 +75,18 @@ func run(logger *slog.Logger) error {
 		logger.Info("FFmpeg ready", "version", capabilities.Version, "encoder", capabilities.Selected.Name, "hardware", capabilities.Selected.Hardware)
 	}
 	liveManager, err := transcode.NewLiveManager(
-		cfg.FFmpegPath, cfg.MirakurunURL, filepath.Join(cfg.DataDirectory, "hls"), capabilities, coordinator, logger,
+		cfg.FFmpegPath, cfg.MirakurunURL, filepath.Join(cfg.DataDirectory, "hls"), capabilities, coordinator, logger.With("component", "live"),
 	)
 	if err != nil {
 		return err
 	}
 	defer liveManager.Close()
 
-	scheduler, err := recording.NewScheduler(store, backend, coordinator, cfg.RecordingDir, cfg.ScheduleMargin, logger)
+	scheduler, err := recording.NewScheduler(store, backend, coordinator, cfg.RecordingDir, cfg.ScheduleMargin, logger.With("component", "scheduler"))
 	if err != nil {
 		return err
 	}
-	webServer, err := web.NewServer(backend, store, scheduler, liveManager, coordinator, cfg.RecordingDir, cfg.ScheduleMargin, cfg.TunerLimit, logger)
+	webServer, err := web.NewServer(backend, store, scheduler, liveManager, coordinator, cfg.RecordingDir, cfg.ScheduleMargin, cfg.TunerLimit, logger.With("component", "http"))
 	if err != nil {
 		return err
 	}
@@ -96,6 +114,7 @@ func run(logger *slog.Logger) error {
 
 	select {
 	case <-ctx.Done():
+		logger.Info("shutdown requested", "reason", ctx.Err())
 		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancelShutdown()
 		if err := httpServer.Shutdown(shutdownContext); err != nil {
@@ -103,6 +122,7 @@ func run(logger *slog.Logger) error {
 		}
 		select {
 		case <-schedulerDone:
+			logger.Info("placidus shutdown complete")
 		case <-shutdownContext.Done():
 			return shutdownContext.Err()
 		}
@@ -115,4 +135,12 @@ func run(logger *slog.Logger) error {
 		<-schedulerDone
 		return err
 	}
+}
+
+func sanitizedHost(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "invalid"
+	}
+	return parsed.Host
 }

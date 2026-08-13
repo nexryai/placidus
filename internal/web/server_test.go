@@ -54,6 +54,10 @@ func (f fakeScheduler) Cancel(id string) error {
 }
 
 func newTestHandler(t *testing.T) (http.Handler, *recording.Store, mirakurun.Program) {
+	return newTestHandlerWithLogger(t, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func newTestHandlerWithLogger(t *testing.T, logger *slog.Logger) (http.Handler, *recording.Store, mirakurun.Program) {
 	t.Helper()
 	now := time.Now()
 	program := mirakurun.Program{
@@ -70,11 +74,51 @@ func newTestHandler(t *testing.T) (http.Handler, *recording.Store, mirakurun.Pro
 		t.Fatal(err)
 	}
 	coordinator := tuner.NewCoordinator(1)
-	server, err := NewServer(backend, store, fakeScheduler{store}, fakeLive{}, coordinator, filepath.Join(directory, "recordings"), 0, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server, err := NewServer(backend, store, fakeScheduler{store}, fakeLive{}, coordinator, filepath.Join(directory, "recordings"), 0, 1, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return server.Handler(), store, program
+}
+
+func TestRequestLoggingIncludesOutcomeAndRequestID(t *testing.T) {
+	var logs strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	handler, _, _ := newTestHandlerWithLogger(t, logger)
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set("User-Agent", "placidus-test")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Header().Get("X-Request-ID") == "" {
+		t.Fatal("response is missing X-Request-ID")
+	}
+	for _, expected := range []string{"http request completed", `"status":200`, `"bytes":`, `"request_id":1`, `"user_agent":"placidus-test"`} {
+		if !strings.Contains(logs.String(), expected) {
+			t.Errorf("logs do not contain %q: %s", expected, logs.String())
+		}
+	}
+}
+
+func TestRequestLogLevelKeepsHighFrequencyRoutesAtDebug(t *testing.T) {
+	tests := []struct {
+		method string
+		path   string
+		status int
+		want   slog.Level
+	}{
+		{http.MethodGet, "/", http.StatusOK, slog.LevelInfo},
+		{http.MethodPost, "/reservations", http.StatusSeeOther, slog.LevelInfo},
+		{http.MethodGet, "/hls/1/segment-000001.ts", http.StatusOK, slog.LevelDebug},
+		{http.MethodGet, "/healthz", http.StatusOK, slog.LevelDebug},
+		{http.MethodGet, "/missing", http.StatusNotFound, slog.LevelWarn},
+		{http.MethodGet, "/broken", http.StatusInternalServerError, slog.LevelError},
+	}
+	for _, test := range tests {
+		request := httptest.NewRequest(test.method, test.path, nil)
+		if got := requestLogLevel(request, test.status); got != test.want {
+			t.Errorf("requestLogLevel(%s, %s, %d) = %s, want %s", test.method, test.path, test.status, got, test.want)
+		}
+	}
 }
 
 func TestHomeRendersMirakurunGuide(t *testing.T) {

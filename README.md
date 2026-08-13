@@ -53,6 +53,7 @@ All configuration is read from environment variables.
 | --- | --- | --- |
 | `PLACIDUS_LISTEN` | `:40773` | HTTP listen address |
 | `PLACIDUS_MIRAKURUN_URL` | `http://127.0.0.1:40772` | Mirakurun base URL |
+| `PLACIDUS_LOG_LEVEL` | `info` | Structured log verbosity: `debug`, `info`, `warn`, or `error` |
 | `PLACIDUS_DATA_DIR` | `./data` | Reservation database and temporary HLS root |
 | `PLACIDUS_RECORDING_DIR` | `$PLACIDUS_DATA_DIR/recordings` | Original MPEG-TS recording directory |
 | `PLACIDUS_FFMPEG` | `ffmpeg` | FFmpeg executable path |
@@ -61,6 +62,8 @@ All configuration is read from environment variables.
 | `PLACIDUS_RECORDING_MARGIN` | `0s` | Extra time recorded before and after the EPG window |
 
 `PLACIDUS_TUNER_LIMIT` should match the tuner capacity made available to placidus. Reservations on the same Mirakurun service share capacity. When recordings occupy the configured capacity, unrelated live channels are blocked and the UI explains that only a service already being recorded can be watched.
+
+Logs are emitted as JSON on standard output. The default `info` level records startup, reservations, recordings, tuner allocation, live-session lifecycle, dependency failures, and normal page or mutation requests. Use `PLACIDUS_LOG_LEVEL=debug` to also record Mirakurun metadata calls, shared-session reuse, HLS segment requests, health polling, and other high-frequency diagnostics.
 
 Example configuration is available in [`.env.example`](.env.example). The program does not load `.env` automatically; export the variables with your process manager or container runtime.
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html/template"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nexryai/placidus/internal/mirakurun"
@@ -51,6 +53,7 @@ type Server struct {
 	logger          *slog.Logger
 	templates       *template.Template
 	mux             *http.ServeMux
+	requestSequence atomic.Uint64
 }
 
 // NewServer parses embedded templates and registers application routes.
@@ -147,6 +150,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		data.BackendError = err.Error()
+		s.logger.Warn("home guide unavailable", "error", err)
 	}
 	s.render(w, "home", data)
 }
@@ -154,6 +158,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 func (s *Server) livePage(w http.ResponseWriter, r *http.Request) {
 	serviceID, err := parseUintPath(r.PathValue("serviceID"))
 	if err != nil {
+		s.logger.Warn("live page rejected invalid service ID", "value", r.PathValue("serviceID"))
 		http.Error(w, "Invalid service ID", http.StatusBadRequest)
 		return
 	}
@@ -166,19 +171,23 @@ func (s *Server) livePage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if selected.ID == 0 && guideErr == nil {
+		s.logger.Warn("live page service not found", "service_id", serviceID)
 		http.NotFound(w, r)
 		return
 	}
 	liveView, startErr := s.live.Start(serviceID)
+	s.logger.Info("live viewing requested", "service_id", serviceID, "service_name", selected.Name)
 	data := liveData{
 		Page:    pageMeta{Title: selected.Name, Active: "live", Recording: s.coordinator.Snapshot()},
 		Service: selected, Services: services, Live: liveView,
 	}
 	if guideErr != nil {
 		data.BackendError = guideErr.Error()
+		s.logger.Warn("live page guide unavailable", "service_id", serviceID, "error", guideErr)
 	}
 	if startErr != nil {
 		data.Page.Error = startErr.Error()
+		s.logger.Warn("live viewing could not start", "service_id", serviceID, "error", startErr)
 	}
 	s.render(w, "live", data)
 }
@@ -186,12 +195,14 @@ func (s *Server) livePage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hlsFile(w http.ResponseWriter, r *http.Request) {
 	serviceID, err := parseUintPath(r.PathValue("serviceID"))
 	if err != nil {
+		s.logger.Warn("HLS request rejected invalid service ID", "value", r.PathValue("serviceID"))
 		http.Error(w, "Invalid service ID", http.StatusBadRequest)
 		return
 	}
 	name := r.PathValue("file")
 	path, _, err := s.live.PlaylistPath(serviceID, name)
 	if err != nil {
+		s.logger.Warn("HLS file unavailable", "service_id", serviceID, "file", name, "error", err)
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
@@ -206,6 +217,9 @@ func (s *Server) hlsFile(w http.ResponseWriter, r *http.Request) {
 				return
 			case <-time.After(100 * time.Millisecond):
 			}
+		}
+		if _, statErr := os.Stat(path); statErr != nil {
+			s.logger.Warn("HLS playlist did not become ready before deadline", "service_id", serviceID, "file", name, "error", statErr)
 		}
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	} else {
@@ -238,21 +252,25 @@ func (s *Server) reservationsPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createReservation(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
+		s.logger.Warn("reservation request form invalid", "error", err)
 		s.redirectReservations(w, r, "", "Invalid reservation form.")
 		return
 	}
 	programID, err := strconv.ParseUint(r.FormValue("program_id"), 10, 64)
 	if err != nil {
+		s.logger.Warn("reservation request program ID invalid", "value", r.FormValue("program_id"))
 		s.redirectReservations(w, r, "", "Invalid program ID.")
 		return
 	}
 	programs, err := s.backend.Programs(r.Context())
 	if err != nil {
+		s.logger.Warn("reservation request could not load programs", "program_id", programID, "error", err)
 		s.redirectReservations(w, r, "", "Could not refresh the Mirakurun program guide.")
 		return
 	}
 	services, err := s.backend.Services(r.Context())
 	if err != nil {
+		s.logger.Warn("reservation request could not load services", "program_id", programID, "error", err)
 		s.redirectReservations(w, r, "", "Could not refresh Mirakurun services.")
 		return
 	}
@@ -264,6 +282,7 @@ func (s *Server) createReservation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if selected.ID == 0 || !selected.EndTime().After(time.Now()) {
+		s.logger.Warn("reservation request rejected unavailable program", "program_id", programID)
 		s.redirectReservations(w, r, "", "That program is unavailable or has already ended.")
 		return
 	}
@@ -275,6 +294,7 @@ func (s *Server) createReservation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if serviceID == 0 {
+		s.logger.Error("reservation service mapping failed", "program_id", selected.ID, "network_id", selected.NetworkID, "mirakurun_service_id", selected.ServiceID)
 		s.redirectReservations(w, r, "", "The program's Mirakurun service could not be found.")
 		return
 	}
@@ -291,19 +311,24 @@ func (s *Server) createReservation(w http.ResponseWriter, r *http.Request) {
 		existing[index].EndAt = existing[index].EndAt.Add(s.recordingMargin)
 	}
 	if recording.WouldConflict(existing, conflictCandidate, s.tunerLimit) {
+		s.logger.Warn("reservation request rejected by conflict policy", "program_id", selected.ID, "service_id", serviceID, "start_at", item.StartAt, "end_at", item.EndAt, "tuner_limit", s.tunerLimit)
 		s.redirectReservations(w, r, "", "This reservation conflicts with another service and the configured tuner limit.")
 		return
 	}
-	if _, err := s.store.Create(item); err != nil {
-		s.logger.Error("create reservation", "error", err)
+	created, err := s.store.Create(item)
+	if err != nil {
+		s.logger.Error("reservation request could not be saved", "program_id", selected.ID, "service_id", serviceID, "error", err)
 		s.redirectReservations(w, r, "", "The reservation could not be saved.")
 		return
 	}
+	s.logger.Info("reservation request accepted", "reservation_id", created.ID, "program_id", created.ProgramID, "service_id", created.ServiceID, "start_at", created.StartAt, "end_at", created.EndAt)
 	s.redirectReservations(w, r, "Recording reserved.", "")
 }
 
 func (s *Server) cancelReservation(w http.ResponseWriter, r *http.Request) {
-	if err := s.scheduler.Cancel(r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+	if err := s.scheduler.Cancel(id); err != nil {
+		s.logger.Warn("reservation cancellation request failed", "reservation_id", id, "error", err)
 		if errors.Is(err, os.ErrNotExist) {
 			http.NotFound(w, r)
 			return
@@ -311,17 +336,20 @@ func (s *Server) cancelReservation(w http.ResponseWriter, r *http.Request) {
 		s.redirectReservations(w, r, "", err.Error())
 		return
 	}
+	s.logger.Info("reservation cancellation request accepted", "reservation_id", id)
 	s.redirectReservations(w, r, "Reservation cancelled.", "")
 }
 
 func (s *Server) recordingFile(w http.ResponseWriter, r *http.Request) {
 	item, ok := s.store.Get(r.PathValue("id"))
 	if !ok || item.FileName == "" || filepath.Base(item.FileName) != item.FileName {
+		s.logger.Warn("recording file not found", "reservation_id", r.PathValue("id"))
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "video/mp2t")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", item.FileName))
+	s.logger.Info("recording playback requested", "reservation_id", item.ID, "service_id", item.ServiceID, "file", item.FileName)
 	http.ServeFile(w, r, filepath.Join(s.recordingDir, item.FileName))
 }
 
@@ -338,10 +366,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 func (s *Server) guide(ctx context.Context) ([]serviceView, error) {
 	services, err := s.backend.Services(ctx)
 	if err != nil {
+		s.logger.Warn("program guide service load failed", "error", err)
 		return nil, fmt.Errorf("Mirakurun services are unavailable: %w", err)
 	}
 	programs, err := s.backend.Programs(ctx)
 	if err != nil {
+		s.logger.Warn("program guide program load failed", "error", err)
 		return nil, fmt.Errorf("Mirakurun program guide is unavailable: %w", err)
 	}
 	now := time.Now()
@@ -379,6 +409,7 @@ func (s *Server) guide(ctx context.Context) ([]serviceView, error) {
 		}
 		return result[i].Number < result[j].Number
 	})
+	s.logger.Debug("program guide assembled", "services", len(result), "programs", len(programs), "window", 24*time.Hour)
 	return result, nil
 }
 
@@ -407,9 +438,72 @@ func (s *Server) redirectReservations(w http.ResponseWriter, r *http.Request, me
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
-		next.ServeHTTP(w, r)
-		s.logger.Debug("http request", "method", r.Method, "path", r.URL.Path, "duration", time.Since(started))
+		requestID := s.requestSequence.Add(1)
+		writer := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
+		writer.Header().Set("X-Request-ID", strconv.FormatUint(requestID, 10))
+		next.ServeHTTP(writer, r)
+		level := requestLogLevel(r, writer.status)
+		s.logger.LogAttrs(r.Context(), level, "http request completed",
+			slog.Uint64("request_id", requestID),
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Int("status", writer.status),
+			slog.Int("bytes", writer.bytes),
+			slog.Duration("duration", time.Since(started)),
+			slog.String("client_ip", clientIP(r.RemoteAddr)),
+			slog.String("user_agent", r.UserAgent()),
+		)
 	})
+}
+
+type responseRecorder struct {
+	http.ResponseWriter
+	status      int
+	bytes       int
+	wroteHeader bool
+}
+
+func (w *responseRecorder) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseRecorder) Write(value []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	count, err := w.ResponseWriter.Write(value)
+	w.bytes += count
+	return count, err
+}
+
+// Unwrap lets net/http reach optional interfaces implemented by the original
+// writer without making this logging wrapper depend on a concrete server type.
+func (w *responseRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func requestLogLevel(r *http.Request, status int) slog.Level {
+	if status >= http.StatusInternalServerError {
+		return slog.LevelError
+	}
+	if status >= http.StatusBadRequest {
+		return slog.LevelWarn
+	}
+	if strings.HasPrefix(r.URL.Path, "/hls/") || r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/api/live/") {
+		return slog.LevelDebug
+	}
+	return slog.LevelInfo
+}
+
+func clientIP(remoteAddress string) string {
+	host, _, err := net.SplitHostPort(remoteAddress)
+	if err != nil {
+		return remoteAddress
+	}
+	return host
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
