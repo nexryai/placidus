@@ -34,16 +34,24 @@ var softwareEncoder = Encoder{
 	VideoArgs: []string{"-preset", "veryfast", "-tune", "zerolatency", "-crf", "23"},
 }
 
-var hardwareEncoders = []Encoder{
-	{Name: "h264_nvenc", Hardware: true, VideoArgs: []string{"-preset", "p4", "-tune", "ll", "-cq", "24"}},
-	{Name: "h264_qsv", Hardware: true, VideoArgs: []string{"-preset", "veryfast", "-global_quality", "25"}},
-	{Name: "h264_vaapi", Hardware: true, InputArgs: []string{"-vaapi_device", "/dev/dri/renderD128"}, FilterArgs: []string{"-vf", "format=nv12,hwupload"}, VideoArgs: []string{"-qp", "24"}},
-	{Name: "h264_videotoolbox", Hardware: true, VideoArgs: []string{"-realtime", "1", "-q:v", "65"}},
-	{Name: "h264_v4l2m2m", Hardware: true, VideoArgs: []string{"-b:v", "5M"}},
+func hardwareEncoders(renderDevice string) []Encoder {
+	return []Encoder{
+		{Name: "h264_nvenc", Hardware: true, VideoArgs: []string{"-preset", "p4", "-tune", "ll", "-cq", "24"}},
+		{
+			Name:       "h264_qsv",
+			Hardware:   true,
+			InputArgs:  []string{"-init_hw_device", "qsv=qsv:hw,child_device=" + renderDevice, "-filter_hw_device", "qsv"},
+			FilterArgs: []string{"-vf", "format=nv12,hwupload=extra_hw_frames=64"},
+			VideoArgs:  []string{"-preset", "veryfast", "-global_quality", "25"},
+		},
+		{Name: "h264_vaapi", Hardware: true, InputArgs: []string{"-vaapi_device", renderDevice}, FilterArgs: []string{"-vf", "format=nv12,hwupload"}, VideoArgs: []string{"-qp", "24"}},
+		{Name: "h264_videotoolbox", Hardware: true, VideoArgs: []string{"-realtime", "1", "-q:v", "65"}},
+		{Name: "h264_v4l2m2m", Hardware: true, VideoArgs: []string{"-b:v", "5M"}},
+	}
 }
 
 // Probe verifies FFmpeg and attempts to initialize each candidate encoder.
-func Probe(ctx context.Context, binary, preferred string, loggers ...*slog.Logger) Capabilities {
+func Probe(ctx context.Context, binary, preferred, renderDevice string, loggers ...*slog.Logger) Capabilities {
 	logger := slog.Default()
 	if len(loggers) > 0 && loggers[0] != nil {
 		logger = loggers[0]
@@ -61,7 +69,7 @@ func Probe(ctx context.Context, binary, preferred string, loggers ...*slog.Logge
 	result.Version = firstLine(string(output))
 	logger.Debug("FFmpeg executable detected", "version", result.Version)
 
-	candidates := orderedHardwareEncoders(preferred)
+	candidates := orderedHardwareEncoders(preferred, renderDevice)
 	for _, candidate := range candidates {
 		logger.Debug("probing hardware encoder", "encoder", candidate.Name)
 		if err := probeEncoder(ctx, binary, candidate); err != nil {
@@ -94,17 +102,18 @@ func Probe(ctx context.Context, binary, preferred string, loggers ...*slog.Logge
 	return result
 }
 
-func orderedHardwareEncoders(preferred string) []Encoder {
-	ordered := make([]Encoder, 0, len(hardwareEncoders))
+func orderedHardwareEncoders(preferred, renderDevice string) []Encoder {
+	candidates := hardwareEncoders(renderDevice)
+	ordered := make([]Encoder, 0, len(candidates))
 	if preferred != "" && preferred != "auto" {
-		for _, candidate := range hardwareEncoders {
+		for _, candidate := range candidates {
 			if candidate.Name == preferred {
 				ordered = append(ordered, candidate)
 				break
 			}
 		}
 	}
-	for _, candidate := range hardwareEncoders {
+	for _, candidate := range candidates {
 		if len(ordered) == 0 || ordered[0].Name != candidate.Name {
 			ordered = append(ordered, candidate)
 		}

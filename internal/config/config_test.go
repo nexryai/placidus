@@ -20,8 +20,18 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Fatalf("LogLevel = %q", cfg.LogLevel)
 	}
+	if cfg.GPUDevice != "/dev/dri/renderD128" {
+		t.Fatalf("GPUDevice = %q", cfg.GPUDevice)
+	}
 	if cfg.RecordingDir != filepath.Join(cfg.DataDirectory, "recordings") {
 		t.Fatalf("RecordingDir = %q", cfg.RecordingDir)
+	}
+}
+
+func TestLoadRejectsEmptyGPUDevice(t *testing.T) {
+	t.Setenv("PLACIDUS_GPU_DEVICE", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() succeeded with an empty GPU device")
 	}
 }
 

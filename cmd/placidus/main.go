@@ -46,6 +46,7 @@ func run() error {
 		"recording_directory", cfg.RecordingDir,
 		"ffmpeg_path", cfg.FFmpegPath,
 		"preferred_encoder", cfg.Encoder,
+		"gpu_device", cfg.GPUDevice,
 		"tuner_limit", cfg.TunerLimit,
 		"recording_margin", cfg.ScheduleMargin,
 		"log_level", cfg.LogLevel,
@@ -67,7 +68,7 @@ func run() error {
 
 	probeContext, cancelProbe := context.WithTimeout(context.Background(), 45*time.Second)
 	logger.Info("probing FFmpeg encoders", "binary", cfg.FFmpegPath, "preferred_encoder", cfg.Encoder)
-	capabilities := transcode.Probe(probeContext, cfg.FFmpegPath, cfg.Encoder, logger.With("component", "ffmpeg_probe"))
+	capabilities := transcode.Probe(probeContext, cfg.FFmpegPath, cfg.Encoder, cfg.GPUDevice, logger.With("component", "ffmpeg_probe"))
 	cancelProbe()
 	if capabilities.Warning != "" {
 		logger.Warn("FFmpeg capability warning", "warning", capabilities.Warning, "failures", capabilities.Failures)

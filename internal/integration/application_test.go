@@ -37,7 +37,7 @@ func TestProgramToRecordingAndLiveViewingLifecycle(t *testing.T) {
 	defer mirakurunServer.Close()
 
 	ffmpeg := fakeFFmpeg(t)
-	capabilities := transcode.Probe(context.Background(), ffmpeg, "h264_nvenc")
+	capabilities := transcode.Probe(context.Background(), ffmpeg, "h264_nvenc", "/dev/dri/renderD128")
 	if !capabilities.Available || !capabilities.Selected.Hardware {
 		t.Fatalf("fake hardware encoder was not selected: %#v", capabilities)
 	}

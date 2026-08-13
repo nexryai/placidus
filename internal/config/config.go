@@ -18,6 +18,7 @@ type Config struct {
 	RecordingDir   string
 	FFmpegPath     string
 	Encoder        string
+	GPUDevice      string
 	LogLevel       string
 	TunerLimit     int
 	ScheduleMargin time.Duration
@@ -33,6 +34,7 @@ func Load() (Config, error) {
 		RecordingDir:   envOr("PLACIDUS_RECORDING_DIR", filepath.Join(dataDir, "recordings")),
 		FFmpegPath:     envOr("PLACIDUS_FFMPEG", "ffmpeg"),
 		Encoder:        envOr("PLACIDUS_ENCODER", "auto"),
+		GPUDevice:      envOr("PLACIDUS_GPU_DEVICE", "/dev/dri/renderD128"),
 		LogLevel:       strings.ToLower(envOr("PLACIDUS_LOG_LEVEL", "info")),
 		TunerLimit:     1,
 		ScheduleMargin: 0,
@@ -54,6 +56,9 @@ func Load() (Config, error) {
 	}
 	if cfg.MirakurunURL == "" {
 		return Config{}, fmt.Errorf("PLACIDUS_MIRAKURUN_URL cannot be empty")
+	}
+	if cfg.GPUDevice == "" {
+		return Config{}, fmt.Errorf("PLACIDUS_GPU_DEVICE cannot be empty")
 	}
 	switch cfg.LogLevel {
 	case "debug", "info", "warn", "error":
