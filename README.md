@@ -43,7 +43,7 @@ docker run --rm -p 40773:40773 \
   placidus
 ```
 
-Pass the relevant GPU or `/dev/dri` device options to the container when hardware encoding is required.
+The image includes placidus's FFmpeg build plus Intel QSV/VA-API and AMD VA-API user-space runtimes. GPU kernel drivers always come from the host. NVIDIA's user-space driver libraries are injected by NVIDIA Container Toolkit because they must match the host driver.
 
 ## Configuration
 
@@ -58,6 +58,7 @@ All configuration is read from environment variables.
 | `PLACIDUS_RECORDING_DIR` | `$PLACIDUS_DATA_DIR/recordings` | Original MPEG-TS recording directory |
 | `PLACIDUS_FFMPEG` | `ffmpeg` | FFmpeg executable path |
 | `PLACIDUS_ENCODER` | `auto` | Preferred FFmpeg hardware encoder name |
+| `PLACIDUS_GPU_DEVICE` | `/dev/dri/renderD128` | DRM render node used by QSV and VA-API |
 | `PLACIDUS_TUNER_LIMIT` | `1` | Number of independently tunable services available to placidus |
 | `PLACIDUS_RECORDING_MARGIN` | `0s` | Extra time recorded before and after the EPG window |
 
@@ -69,13 +70,64 @@ Example configuration is available in [`.env.example`](.env.example). The progra
 
 ## FFmpeg Hardware Setup
 
-Use `ffmpeg -encoders` to confirm the expected encoder is compiled in, then verify the host exposes its device and driver to the placidus process. Merely appearing in the encoder list is not enough: placidus encodes a short synthetic frame during startup to verify initialization.
+The Alpine container image contains an FFmpeg build with `h264_nvenc`, `h264_qsv` on amd64, `h264_vaapi`, and `libx264`. It also contains these Linux user-space runtimes:
+
+- Modern Intel VA-API (`intel-media-driver`) and oneVPL (`onevpl-intel-gpu`) on amd64.
+- Legacy Intel VA-API (`libva-intel-driver`) on amd64.
+- AMD and supported Mesa VA-API drivers (`mesa-va-gallium`).
+- `vainfo` for in-container VA-API diagnostics.
+
+Kernel drivers and physical devices cannot be packaged into a portable container image. The host must have a working GPU driver and expose the GPU to the container. Merely appearing in `ffmpeg -encoders` is not enough: placidus encodes a short synthetic frame during startup to verify initialization.
+
+### Intel QSV or VA-API
+
+Expose the render node and optionally select QSV explicitly:
+
+```yaml
+services:
+  placidus:
+    image: ghcr.io/nexryai/placidus:latest
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    environment:
+      PLACIDUS_ENCODER: h264_qsv
+      PLACIDUS_GPU_DEVICE: /dev/dri/renderD128
+```
+
+Use `h264_vaapi` instead when QSV is unavailable. If the GPU is exposed as another render node, update both the device mapping and `PLACIDUS_GPU_DEVICE`. Useful checks are:
+
+```sh
+docker compose exec placidus vainfo --display drm --device /dev/dri/renderD128
+docker compose exec placidus ffmpeg -hide_banner -encoders
+```
+
+The container process must have read/write permission on the render node. Add the host render group with `group_add` when the container runtime does not grant it through the device mapping.
+
+### AMD VA-API
+
+Use the same DRM mapping with `PLACIDUS_ENCODER=h264_vaapi`. The bundled Mesa runtime selects the applicable `radeonsi` or `r600` driver; the host still needs the corresponding `amdgpu` or `radeon` kernel driver.
+
+### NVIDIA NVENC
+
+Install a compatible NVIDIA driver and NVIDIA Container Toolkit on the host. Compose must request the GPU; a `/dev/dri` mapping is not a substitute for NVIDIA runtime injection:
+
+```yaml
+services:
+  placidus:
+    image: ghcr.io/nexryai/placidus:latest
+    gpus: all
+    environment:
+      PLACIDUS_ENCODER: h264_nvenc
+      NVIDIA_DRIVER_CAPABILITIES: video,utility
+```
+
+The image contains an NVENC-enabled FFmpeg binary, but it intentionally does not contain NVIDIA kernel modules or version-coupled driver libraries. NVIDIA Container Toolkit mounts the matching host libraries, including the Video Codec SDK runtime, into the container.
 
 Common choices include:
 
-- NVIDIA: `h264_nvenc`
-- Intel: `h264_qsv`
-- Linux VA-API: `h264_vaapi` with `/dev/dri/renderD128` available
+- NVIDIA: `h264_nvenc` with NVIDIA Container Toolkit and `gpus: all`
+- Intel: `h264_qsv` with the configured DRM render node available
+- Intel or AMD VA-API: `h264_vaapi` with the configured DRM render node available
 - macOS: `h264_videotoolbox`
 - V4L2 devices: `h264_v4l2m2m`
 
