@@ -2,12 +2,12 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net"
 	"net/http"
@@ -26,8 +26,8 @@ import (
 	"github.com/nexryai/placidus/internal/tuner"
 )
 
-//go:embed templates/*.gotmpl
-var templateFiles embed.FS
+//go:embed dist
+var frontendFiles embed.FS
 
 type liveService interface {
 	Start(uint64) (transcode.LiveView, error)
@@ -51,29 +51,23 @@ type Server struct {
 	recordingMargin time.Duration
 	tunerLimit      int
 	logger          *slog.Logger
-	templates       *template.Template
+	index           []byte
 	mux             *http.ServeMux
 	requestSequence atomic.Uint64
 }
 
-// NewServer parses embedded templates and registers application routes.
+// NewServer loads the embedded SPA and registers application routes.
 func NewServer(backend mirakurun.API, store *recording.Store, scheduler reservationScheduler, live liveService, coordinator *tuner.Coordinator, recordingDir string, recordingMargin time.Duration, tunerLimit int, logger *slog.Logger) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	functions := template.FuncMap{
-		"clock":      func(value time.Time) string { return value.Local().Format("15:04") },
-		"dateTime":   func(value time.Time) string { return value.Local().Format("Jan 2, 15:04") },
-		"duration":   formatDuration,
-		"stateClass": func(state recording.State) string { return "state-" + string(state) },
-	}
-	views, err := template.New("views").Funcs(functions).ParseFS(templateFiles, "templates/*.gotmpl")
+	index, err := frontendFiles.ReadFile("dist/index.html")
 	if err != nil {
-		return nil, fmt.Errorf("parse templates: %w", err)
+		return nil, fmt.Errorf("load embedded UI (run pnpm run build first): %w", err)
 	}
 	server := &Server{
 		backend: backend, store: store, scheduler: scheduler, live: live, coordinator: coordinator,
-		recordingDir: recordingDir, recordingMargin: recordingMargin, tunerLimit: tunerLimit, logger: logger, templates: views, mux: http.NewServeMux(),
+		recordingDir: recordingDir, recordingMargin: recordingMargin, tunerLimit: tunerLimit, logger: logger, index: index, mux: http.NewServeMux(),
 	}
 	server.routes()
 	return server, nil
@@ -90,11 +84,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/reservations", s.reservationsPage)
 	s.mux.HandleFunc("POST /api/reservations", s.createReservation)
 	s.mux.HandleFunc("POST /api/reservations/{id}/cancel", s.cancelReservation)
-	s.mux.HandleFunc("GET /{$}", s.home)
-	s.mux.HandleFunc("GET /live/{serviceID}", s.livePage)
+	s.mux.HandleFunc("GET /{$}", s.app)
+	s.mux.HandleFunc("GET /assets/{file}", s.asset)
+	s.mux.HandleFunc("GET /live/{serviceID}", s.app)
 	s.mux.HandleFunc("GET /hls/{serviceID}/{file}", s.hlsFile)
 	s.mux.HandleFunc("GET /api/live/{serviceID}/status", s.liveStatus)
-	s.mux.HandleFunc("GET /reservations", s.reservationsPage)
+	s.mux.HandleFunc("GET /reservations", s.app)
 	s.mux.HandleFunc("POST /reservations", s.createReservation)
 	s.mux.HandleFunc("POST /reservations/{id}/cancel", s.cancelReservation)
 	s.mux.HandleFunc("GET /recordings/{id}/file", s.recordingFile)
@@ -157,7 +152,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		data.BackendError = err.Error()
 		s.logger.Warn("home guide unavailable", "error", err)
 	}
-	s.render(w, r, "home", data)
+	writeJSON(w, http.StatusOK, data)
 }
 
 func (s *Server) livePage(w http.ResponseWriter, r *http.Request) {
@@ -168,14 +163,14 @@ func (s *Server) livePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	services, guideErr := s.guide(r.Context())
-	var selected serviceView
+	selected := serviceView{ID: serviceID}
 	for _, service := range services {
 		if service.ID == serviceID {
 			selected = service
 			break
 		}
 	}
-	if selected.ID == 0 && guideErr == nil {
+	if selected.Name == "" && guideErr == nil {
 		s.logger.Warn("live page service not found", "service_id", serviceID)
 		http.NotFound(w, r)
 		return
@@ -194,7 +189,7 @@ func (s *Server) livePage(w http.ResponseWriter, r *http.Request) {
 		data.Page.Error = startErr.Error()
 		s.logger.Warn("live viewing could not start", "service_id", serviceID, "error", startErr)
 	}
-	s.render(w, r, "live", data)
+	writeJSON(w, http.StatusOK, data)
 }
 
 func (s *Server) hlsFile(w http.ResponseWriter, r *http.Request) {
@@ -246,7 +241,7 @@ func (s *Server) liveStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) reservationsPage(w http.ResponseWriter, r *http.Request) {
-	s.render(w, r, "reservations", reservationsData{
+	writeJSON(w, http.StatusOK, reservationsData{
 		Page: pageMeta{
 			Title: "Reservations", Active: "reservations", Message: r.URL.Query().Get("message"),
 			Error: r.URL.Query().Get("error"), Recording: s.coordinator.Snapshot(),
@@ -418,15 +413,22 @@ func (s *Server) guide(ctx context.Context) ([]serviceView, error) {
 	return result, nil
 }
 
-func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, data any) {
-	if strings.HasPrefix(r.URL.Path, "/api/") {
-		writeJSON(w, http.StatusOK, data)
+// app serves only known client routes; API and missing assets never fall back to HTML.
+func (s *Server) app(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(s.index)
+}
+
+func (s *Server) asset(w http.ResponseWriter, r *http.Request) {
+	data, err := frontendFiles.ReadFile("dist/assets/" + r.PathValue("file"))
+	if err != nil {
+		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.templates.ExecuteTemplate(w, name, data); err != nil {
-		s.logger.Error("render template", "template", name, "error", err)
-	}
+	// Vite fingerprints assets, so they can be cached independently of the HTML shell.
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	http.ServeContent(w, r, r.PathValue("file"), time.Time{}, bytes.NewReader(data))
 }
 
 func (s *Server) redirectReservations(w http.ResponseWriter, r *http.Request, message, errorMessage string) {
@@ -528,7 +530,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; media-src 'self' blob:; connect-src 'self'; img-src 'self' data:")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; media-src 'self' blob:; connect-src 'self'; img-src 'self' data:")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -546,14 +548,6 @@ func fallbackTitle(value string) string {
 		return "Untitled program"
 	}
 	return value
-}
-
-func formatDuration(value time.Duration) string {
-	minutes := int(value.Round(time.Minute).Minutes())
-	if minutes < 60 {
-		return fmt.Sprintf("%d min", minutes)
-	}
-	return fmt.Sprintf("%dh %02dm", minutes/60, minutes%60)
 }
 
 // writeJSON keeps dynamic application state out of browser and proxy caches.

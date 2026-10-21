@@ -139,15 +139,15 @@ func TestUnknownRouteReturnsNotFoundAndLogsWarning(t *testing.T) {
 	}
 }
 
-func TestHomeRendersMirakurunGuide(t *testing.T) {
+func TestHomeAPIReturnsMirakurunGuide(t *testing.T) {
 	handler, _, _ := newTestHandler(t)
-	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/home", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d", response.Code)
 	}
-	for _, expected := range []string{"Test TV", "Morning News", "h264_nvenc", "Program guide"} {
+	for _, expected := range []string{"Test TV", "Morning News", "h264_nvenc"} {
 		if !strings.Contains(response.Body.String(), expected) {
 			t.Errorf("home page does not contain %q", expected)
 		}
@@ -172,7 +172,7 @@ func TestCreateReservationUsesAuthoritativeProgramData(t *testing.T) {
 		t.Fatalf("stored reservations = %#v", items)
 	}
 
-	listRequest := httptest.NewRequest(http.MethodGet, "/reservations", nil)
+	listRequest := httptest.NewRequest(http.MethodGet, "/api/reservations", nil)
 	listResponse := httptest.NewRecorder()
 	handler.ServeHTTP(listResponse, listRequest)
 	if listResponse.Code != http.StatusOK || !strings.Contains(listResponse.Body.String(), "Morning News") || !strings.Contains(listResponse.Body.String(), "scheduled") {
@@ -180,17 +180,16 @@ func TestCreateReservationUsesAuthoritativeProgramData(t *testing.T) {
 	}
 }
 
-func TestLivePageStartsPinnedHLSPlayer(t *testing.T) {
+func TestLiveAPIReturnsPlayerState(t *testing.T) {
 	handler, _, _ := newTestHandler(t)
-	request := httptest.NewRequest(http.MethodGet, "/live/3273601024", nil)
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/live/3273601024", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d", response.Code)
 	}
-	for _, expected := range []string{"hls.js@1.6.16", "/hls/3273601024/index.m3u8", "h264_nvenc"} {
+	for _, expected := range []string{"Test TV", "Morning News", "h264_nvenc"} {
 		if !strings.Contains(response.Body.String(), expected) {
-			t.Errorf("live page does not contain %q", expected)
+			t.Errorf("live state does not contain %q", expected)
 		}
 	}
 }
@@ -249,5 +248,52 @@ func TestReservationAPICreateCancelAndErrors(t *testing.T) {
 	item, _ := store.Get(items[0].ID)
 	if response.Code != http.StatusOK || item.State != recording.StateCancelled {
 		t.Fatalf("cancel response = %d, item = %#v", response.Code, item)
+	}
+}
+
+func TestEmbeddedSPARoutesAndAssets(t *testing.T) {
+	handler, _, _ := newTestHandler(t)
+	for _, path := range []string{"/", "/live/3273601024", "/reservations"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `id="root"`) {
+			t.Fatalf("SPA response at %s = %d %s", path, response.Code, response.Body.String())
+		}
+		if response.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal("HTML shell must not be cached across releases")
+		}
+	}
+	assets, err := frontendFiles.ReadDir("dist/assets")
+	if err != nil || len(assets) == 0 {
+		t.Fatalf("no embedded assets: %v", err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/"+assets[0].Name(), nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Header().Get("Cache-Control"), "immutable") || !strings.Contains(response.Header().Get("Content-Type"), "javascript") {
+		t.Fatalf("asset response = %d %v", response.Code, response.Header())
+	}
+	for _, path := range []string{"/assets/missing.js", "/api/missing", "/missing"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusNotFound || strings.Contains(response.Body.String(), `id="root"`) {
+			t.Fatalf("%s returned SPA HTML instead of 404", path)
+		}
+	}
+}
+
+func TestLiveAPIRejectsInvalidAndUnknownServices(t *testing.T) {
+	handler, _, _ := newTestHandler(t)
+	for _, test := range []struct {
+		path   string
+		status int
+	}{
+		{"/api/live/invalid", http.StatusBadRequest},
+		{"/api/live/999", http.StatusNotFound},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, test.path, nil))
+		if response.Code != test.status {
+			t.Fatalf("%s status = %d", test.path, response.Code)
+		}
 	}
 }

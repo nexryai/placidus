@@ -21,16 +21,18 @@ Keep the product focused. Do not add social features, viewer chat, live comments
 - The backend integration target is Mirakurun only. Do not add EDCB, Mirakc, or other backend-specific implementations or compatibility layers unless the project direction is explicitly changed.
 - KonomiTV may be studied for product behavior and broad UI information architecture, but placidus code must be written from scratch.
 - A limited set of assets, such as program-guide channel logos, may be reused from KonomiTV only after verifying their license, attribution, and redistribution requirements. Record the origin and applicable license of every reused asset.
-- Prefer the Go standard library and small, well-maintained dependencies. Avoid a frontend build toolchain unless it becomes strictly necessary.
+- Prefer the Go standard library and small, well-maintained dependencies. Keep the React + Vite UI embedded in a single Go binary.
 - Keep boundaries between Mirakurun access, tuner/session coordination, recording, transcoding, persistence, and HTTP presentation so each can be tested independently.
 
 ## Frontend Rules
 
-- Render the frontend with Go templates. Template filenames must use the `.gotmpl` extension.
-- Do not create standalone CSS files. Put CSS in `<style>` blocks in `.gotmpl` templates; shared styles should live in a shared/base `.gotmpl` template.
-- JavaScript may be embedded in templates. A browser library may be imported from a CDN when it materially reduces complexity; pin its version and use integrity and CORS attributes when the CDN provides them.
+- Implement the frontend as a React + Vite SPA, with `package.json` at the repository root and UI source in `src/`.
+- Use pnpm for frontend dependencies, scripts, and the committed lockfile.
+- Use Tabler Icons for UI icons, retaining accessible text labels.
+- Use mintcss inside each page or component file. Keep global styles minimal and do not create standalone CSS files.
+- Embed the production Vite build in the Go executable. Bundle browser libraries rather than depending on runtime CDNs.
 - The information architecture may feel familiar to KonomiTV users, but the visual design must be original and YouTube-inspired: content-first, responsive, accessible, restrained, and usable in both light and dark environments.
-- Prefer server-rendered interactions and small amounts of progressive enhancement over a client-side application framework.
+- Preserve the existing focused UI and accessible navigation. Keep API access separate from page rendering and clean up playback and polling on navigation.
 - Never implement or display comments, chat, reaction streams, floating messages, or comment settings.
 - Make warnings operationally useful and accessible. Do not communicate important state using color alone.
 

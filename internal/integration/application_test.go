@@ -68,7 +68,7 @@ func TestProgramToRecordingAndLiveViewingLifecycle(t *testing.T) {
 	application := httptest.NewServer(server.Handler())
 	defer application.Close()
 
-	home := getBody(t, application.URL+"/")
+	home := getBody(t, application.URL+"/api/home")
 	if !strings.Contains(home, "Integration News") || !strings.Contains(home, "One TV") {
 		t.Fatalf("program guide is missing backend data")
 	}
@@ -87,12 +87,12 @@ func TestProgramToRecordingAndLiveViewingLifecycle(t *testing.T) {
 	go func() { scheduler.Run(ctx); close(done) }()
 	waitForState(t, store, recording.StateRecording, 2*time.Second)
 
-	blockedPage := getBody(t, application.URL+"/live/200")
+	blockedPage := getBody(t, application.URL+"/api/live/200")
 	if !strings.Contains(blockedPage, "live viewing is unavailable while recordings occupy all tuners") ||
 		!strings.Contains(blockedPage, "Tuners are occupied by recording") {
 		t.Fatal("unrelated live service was not blocked with a visible recording warning")
 	}
-	getBody(t, application.URL+"/live/100")
+	getBody(t, application.URL+"/api/live/100")
 	playlist := getBody(t, application.URL+"/hls/100/index.m3u8")
 	if !strings.Contains(playlist, "#EXTM3U") {
 		t.Fatalf("live HLS playlist was not served: %q", playlist)

@@ -36,3 +36,9 @@ go.work.sum
 # .vscode/
 
 /KonomiTV
+
+# Frontend dependencies, generated bundle, and browser test artifacts
+/node_modules/
+/internal/web/dist/
+/playwright-report/
+/test-results/

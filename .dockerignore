@@ -3,3 +3,8 @@ KonomiTV
 data
 *.test
 coverage.*
+
+node_modules
+internal/web/dist
+playwright-report
+test-results

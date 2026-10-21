@@ -73,12 +73,23 @@ RUN cd /tmp/ffmpeg \
 RUN make -C /tmp/ffmpeg -j"$(getconf _NPROCESSORS_ONLN)" \
     && make -C /tmp/ffmpeg install
 
+FROM node:24-alpine AS ui-build
+
+WORKDIR /src
+RUN npm install --global pnpm@11.24.0
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY index.html tsconfig.json vite.config.ts ./
+COPY src ./src
+RUN pnpm run build
+
 FROM golang:1.26-alpine3.24 AS build
 
 WORKDIR /src
 COPY go.mod ./
 COPY cmd ./cmd
 COPY internal ./internal
+COPY --from=ui-build /src/internal/web/dist ./internal/web/dist
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/placidus ./cmd/placidus
 
 FROM alpine:3.24.1

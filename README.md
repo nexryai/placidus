@@ -1,15 +1,16 @@
 # placidus
 
-placidus is a small, Mirakurun-only web television server written in Go. It provides a server-rendered program guide, live HLS viewing, recording reservations, original MPEG-TS recordings, and explicit tuner/encoder warnings in a quiet YouTube-inspired interface.
+placidus is a small, Mirakurun-only web television server written in Go. It provides a React program guide, live HLS viewing, recording reservations, original MPEG-TS recordings, and explicit tuner/encoder warnings in a quiet YouTube-inspired interface.
 
 This is an early working implementation. Run it on a trusted network: authentication and TLS termination are not included yet.
 
 ## Requirements
 
-- Go 1.26 or later when building from source.
+- Go 1.26 or later and Node.js 24+ with pnpm when building from source.
+- Released binaries embed the UI and do not require Node.js at runtime.
 - A reachable Mirakurun server with EPG data and at least one configured tuner.
 - FFmpeg on `PATH` for live viewing. Recording the original MPEG-TS stream does not require transcoding.
-- A modern browser. Safari can play HLS natively; other supported browsers load the pinned HLS.js player from jsDelivr.
+- A modern browser. Safari can play HLS natively; other supported browsers use the bundled HLS.js player.
 
 placidus probes real encoder initialization at startup. It prefers hardware encoders exposed through FFmpeg (NVENC, QSV, VAAPI, VideoToolbox, or V4L2 M2M) and uses `libx264` only when no hardware path works. Software fallback is always shown in logs and in the web interface.
 
@@ -18,6 +19,8 @@ placidus probes real encoder initialization at startup. It prefers hardware enco
 Start Mirakurun first, install FFmpeg, and run:
 
 ```sh
+pnpm install --frozen-lockfile
+pnpm run build
 go run ./cmd/placidus
 ```
 
@@ -141,9 +144,22 @@ Recordings have priority over ordinary live viewing. State is reconciled after a
 
 ## Development
 
+The React + TypeScript SPA lives in `src/`, with `package.json` and Vite configuration at the repository root. Tabler Icons provide bundled SVG icons with visible text labels. Each page or component owns its mintcss styles in its TSX file. The only document-wide reset removes the body margin. Shared tokens and typography are scoped to the application root. Ripple feedback supports pointer and keyboard activation and respects reduced-motion preferences.
+
+Build the UI before running Go commands. Vite writes fingerprinted assets to `internal/web/dist`; Go embeds this directory in the executable. Generated assets are not committed. Docker builds the UI in a separate Node stage before compiling Go, so the runtime image needs no Node.js installation.
+
+```sh
+pnpm install --frozen-lockfile
+pnpm run build
+```
+
+For UI development, run `go run ./cmd/placidus` and `pnpm run dev` in separate terminals, then open the Vite URL. Vite proxies API, HLS, recording-file, and health requests to `127.0.0.1:40773`. Production serves the SPA and API from the same Go process, including direct links to live channels and the library.
+
 Run all tests and static checks:
 
 ```sh
+pnpm test
+pnpm run build
 go test ./...
 go test -race ./...
 go vet ./...
@@ -155,7 +171,14 @@ Build without leaving a binary in the repository:
 go build -o /tmp/placidus ./cmd/placidus
 ```
 
-Frontend templates live under `internal/web/templates` and use the `.gotmpl` extension. All CSS is embedded in the shared template; there are no standalone CSS assets or viewer comment features.
+Browser tests exercise the embedded production UI, SPA navigation, reservations, cancellation, Ripple feedback, and narrow screens with mocked Mirakurun page data:
+
+```sh
+pnpm exec playwright install chromium
+pnpm run test:e2e
+```
+
+The browser test server uses temporary runtime storage and does not require Mirakurun or FFmpeg. Unit tests also cover live-player cleanup and visible software fallback updates.
 
 ## Health Endpoint
 
