@@ -85,6 +85,11 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) routes() {
+	s.mux.HandleFunc("GET /api/home", s.home)
+	s.mux.HandleFunc("GET /api/live/{serviceID}", s.livePage)
+	s.mux.HandleFunc("GET /api/reservations", s.reservationsPage)
+	s.mux.HandleFunc("POST /api/reservations", s.createReservation)
+	s.mux.HandleFunc("POST /api/reservations/{id}/cancel", s.cancelReservation)
 	s.mux.HandleFunc("GET /{$}", s.home)
 	s.mux.HandleFunc("GET /live/{serviceID}", s.livePage)
 	s.mux.HandleFunc("GET /hls/{serviceID}/{file}", s.hlsFile)
@@ -152,7 +157,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		data.BackendError = err.Error()
 		s.logger.Warn("home guide unavailable", "error", err)
 	}
-	s.render(w, "home", data)
+	s.render(w, r, "home", data)
 }
 
 func (s *Server) livePage(w http.ResponseWriter, r *http.Request) {
@@ -189,7 +194,7 @@ func (s *Server) livePage(w http.ResponseWriter, r *http.Request) {
 		data.Page.Error = startErr.Error()
 		s.logger.Warn("live viewing could not start", "service_id", serviceID, "error", startErr)
 	}
-	s.render(w, "live", data)
+	s.render(w, r, "live", data)
 }
 
 func (s *Server) hlsFile(w http.ResponseWriter, r *http.Request) {
@@ -241,7 +246,7 @@ func (s *Server) liveStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) reservationsPage(w http.ResponseWriter, r *http.Request) {
-	s.render(w, "reservations", reservationsData{
+	s.render(w, r, "reservations", reservationsData{
 		Page: pageMeta{
 			Title: "Reservations", Active: "reservations", Message: r.URL.Query().Get("message"),
 			Error: r.URL.Query().Get("error"), Recording: s.coordinator.Snapshot(),
@@ -413,7 +418,11 @@ func (s *Server) guide(ctx context.Context) ([]serviceView, error) {
 	return result, nil
 }
 
-func (s *Server) render(w http.ResponseWriter, name string, data any) {
+func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, data any) {
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		writeJSON(w, http.StatusOK, data)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.templates.ExecuteTemplate(w, name, data); err != nil {
 		s.logger.Error("render template", "template", name, "error", err)
@@ -421,6 +430,14 @@ func (s *Server) render(w http.ResponseWriter, name string, data any) {
 }
 
 func (s *Server) redirectReservations(w http.ResponseWriter, r *http.Request, message, errorMessage string) {
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		status := http.StatusOK
+		if errorMessage != "" {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"message": message, "error": errorMessage})
+		return
+	}
 	values := make([]string, 0, 2)
 	if message != "" {
 		values = append(values, "message="+url.QueryEscape(message))
@@ -537,4 +554,12 @@ func formatDuration(value time.Duration) string {
 		return fmt.Sprintf("%d min", minutes)
 	}
 	return fmt.Sprintf("%dh %02dm", minutes/60, minutes%60)
+}
+
+// writeJSON keeps dynamic application state out of browser and proxy caches.
+func writeJSON(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(data)
 }

@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -204,5 +205,49 @@ func TestLiveStatusEndpointSupportsVisibleFallbackUpdates(t *testing.T) {
 	}
 	if response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatal("live status response can be cached")
+	}
+}
+
+func TestPageAPIsReturnStateWithoutCaching(t *testing.T) {
+	handler, _, _ := newTestHandler(t)
+	for _, path := range []string{"/api/home", "/api/live/3273601024", "/api/reservations"} {
+		t.Run(path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+			var data map[string]json.RawMessage
+			if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &data) != nil {
+				t.Fatalf("response = %d %s", response.Code, response.Body.String())
+			}
+			if data["Page"] == nil || response.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("missing page state or cache protection: %s", response.Body.String())
+			}
+		})
+	}
+}
+
+func TestReservationAPICreateCancelAndErrors(t *testing.T) {
+	handler, store, _ := newTestHandler(t)
+	post := func(path, form string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	if response := post("/api/reservations", "program_id=invalid"); response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "Invalid program ID") {
+		t.Fatalf("invalid program response = %d %s", response.Code, response.Body.String())
+	}
+	response := post("/api/reservations", "program_id=99&title=Untrusted")
+	if response.Code != http.StatusOK || response.Header().Get("Location") != "" {
+		t.Fatalf("create response = %d %s", response.Code, response.Body.String())
+	}
+	items := store.List()
+	if len(items) != 1 || items[0].Title != "Morning News" {
+		t.Fatalf("reservations = %#v", items)
+	}
+	response = post("/api/reservations/"+items[0].ID+"/cancel", "")
+	item, _ := store.Get(items[0].ID)
+	if response.Code != http.StatusOK || item.State != recording.StateCancelled {
+		t.Fatalf("cancel response = %d, item = %#v", response.Code, item)
 	}
 }
